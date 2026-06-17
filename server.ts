@@ -327,7 +327,7 @@ app.post("/api/rooms/:roomId/cpu", (req, res) => {
 // API: Sync and poll room stats
 app.post("/api/rooms/:roomId/sync", (req, res) => {
   const { roomId } = req.params;
-  const { playerId, stats } = req.body;
+  const { playerId, stats, cpuStats } = req.body;
   const room = rooms[roomId];
 
   if (!room) {
@@ -365,6 +365,25 @@ app.post("/api/rooms/:roomId/sync", (req, res) => {
     // If finished, check if we need to set winner
     if (stats.finished && !room.winnerId) {
       room.winnerId = playerId;
+    }
+  }
+
+  // Update CPU player if provided
+  if (cpuStats && room.players[cpuStats.id]) {
+    room.players[cpuStats.id] = {
+      ...room.players[cpuStats.id],
+      position: cpuStats.position,
+      speed: cpuStats.speed,
+      mascon: cpuStats.mascon,
+      overheat: cpuStats.overheat,
+      derailed: cpuStats.derailed,
+      derailTimeLeft: cpuStats.derailTimeLeft,
+      finished: cpuStats.finished,
+    };
+
+    // If finished, check if we need to set winner
+    if (cpuStats.finished && !room.winnerId) {
+      room.winnerId = cpuStats.id;
     }
   }
 

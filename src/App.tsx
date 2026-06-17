@@ -202,6 +202,10 @@ export default function App() {
   const [playerId, setPlayerId] = useState<string | null>(null);
   const [roomId, setRoomId] = useState<string | null>(null);
   const [room, setRoom] = useState<GameRoom | null>(null);
+  const roomRef = useRef<GameRoom | null>(null);
+  useEffect(() => {
+    roomRef.current = room;
+  }, [room]);
   const [isCpuMatch, setIsCpuMatch] = useState(false);
 
   // Audio elements (retro chimes via synthesizers to bypass external asset limits)
@@ -314,6 +318,7 @@ export default function App() {
   const opponentFinishedRef = useRef(false);
   const opponentDerailedRef = useRef(false);
   const opponentMasconRef = useRef<MasconState>("N");
+  const opponentNameRef = useRef("対戦相手 (Driver 2)");
 
   // Timer trackers
   const raceStartTimeRef = useRef<number | null>(null);
@@ -331,6 +336,7 @@ export default function App() {
   const cpuDerailTimeLeftRef = useRef(0);
   const cpuFinishedRef = useRef(false);
   const cpuStationTimerRef = useRef(0); // boarding at station stop
+  const cpuPlayerIdRef = useRef<string | null>(null);
 
   // Load Leaderboards on mount
   useEffect(() => {
@@ -343,7 +349,7 @@ export default function App() {
       const list = await res.json();
       setLeaderboard(list);
     } catch (e) {
-      console.error("Failed to fetch leaderboards:", e);
+      console.error("Failed to fetch leaderboard:", e);
     }
   };
 
@@ -363,6 +369,7 @@ export default function App() {
     opponentFinishedRef.current = false;
     opponentDerailedRef.current = false;
     opponentMasconRef.current = "N";
+    opponentNameRef.current = "対戦相手 (Driver 2)";
 
     cpuPositionRef.current = 0;
     cpuSpeedRef.current = 0;
@@ -372,6 +379,7 @@ export default function App() {
     cpuDerailTimeLeftRef.current = 0;
     cpuFinishedRef.current = false;
     cpuStationTimerRef.current = 0;
+    cpuPlayerIdRef.current = null;
 
     setStationStopped(false);
     setStationGrade("");
@@ -425,6 +433,11 @@ export default function App() {
         });
         const cpuData = await cpuRes.json();
         setRoom(cpuData);
+        // Find CPU player key
+        const foundCpuKey = Object.keys(cpuData.players).find((id) => id.startsWith("cpu_"));
+        if (foundCpuKey) {
+          cpuPlayerIdRef.current = foundCpuKey;
+        }
         setActiveScreen("matchmaking");
         startMatchPolling(data.roomId, data.playerId);
       } else {
@@ -478,14 +491,22 @@ export default function App() {
     if (syncIntervalIdRef.current) clearInterval(syncIntervalIdRef.current);
 
     syncIntervalIdRef.current = setInterval(async () => {
-      // Find CPU ID if matching against CPU
-      const cpuKey = room ? Object.keys(room.players).find((k) => k.startsWith("cpu_")) : null;
+      // Find CPU key if playing against CPU
+      let cpuKey = cpuPlayerIdRef.current;
+      const currentRoom = roomRef.current;
+      if (!cpuKey && currentRoom && currentRoom.players) {
+        cpuKey = Object.keys(currentRoom.players).find((k) => k.startsWith("cpu_")) || null;
+        if (cpuKey) {
+          cpuPlayerIdRef.current = cpuKey;
+        }
+      }
 
+      let cpuStatsToSend: PlayerStats | undefined = undefined;
       // Host simulates the CPU and uploads its position to server
-      if (cpuKey && room) {
-        room.players[cpuKey] = {
+      if (cpuKey) {
+        cpuStatsToSend = {
           id: cpuKey,
-          name: "AI特急ライナー",
+          name: currentRoom?.players?.[cpuKey]?.name || "AI特急ライナー",
           position: cpuPositionRef.current,
           speed: cpuSpeedRef.current,
           mascon: cpuMasconRef.current,
@@ -516,12 +537,21 @@ export default function App() {
           body: JSON.stringify({
             playerId: pId,
             stats: clientStats,
+            cpuStats: cpuStatsToSend,
           }),
         });
         const updatedRoom: GameRoom = await res.json();
 
         if (updatedRoom && updatedRoom.players) {
           setRoom(updatedRoom);
+
+          // Back up dynamic search for CPU key in case it was missing
+          if (!cpuPlayerIdRef.current) {
+            const foundCpuKey = Object.keys(updatedRoom.players).find((id) => id.startsWith("cpu_"));
+            if (foundCpuKey) {
+              cpuPlayerIdRef.current = foundCpuKey;
+            }
+          }
 
           // Extract opponent information
           const oppKey = Object.keys(updatedRoom.players).find((id) => id !== pId);
@@ -532,6 +562,7 @@ export default function App() {
             opponentFinishedRef.current = opp.finished;
             opponentDerailedRef.current = opp.derailed;
             opponentMasconRef.current = opp.mascon;
+            opponentNameRef.current = opp.name;
 
             setRenderStats((prev) => ({
               ...prev,
@@ -707,17 +738,8 @@ export default function App() {
   };
 
   const animateCpuPhysics = (dt: number, limitSpeed: number) => {
-    // Overheat simulation
-    if (cpuMasconRef.current === "P4") {
-      cpuOverheatRef.current += dt * 8;
-    } else {
-      cpuOverheatRef.current = Math.max(0, cpuOverheatRef.current - dt * 6);
-    }
-
-    if (cpuOverheatRef.current >= 100) {
-      cpuOverheatRef.current = 100;
-      cpuMasconRef.current = "N"; // force blown circuit
-    }
+    // Overheat simulation disabled
+    cpuOverheatRef.current = 0;
 
     // Calculate applied acceleration
     let a = 0;
@@ -725,7 +747,7 @@ export default function App() {
       a = -12.0; // severe force deceleration
     } else {
       const m = cpuMasconRef.current;
-      if (m === "P4" && cpuOverheatRef.current < 100) a = 2.8;
+      if (m === "P4") a = 2.8;
       else if (m === "P3") a = 2.0;
       else if (m === "P2") a = 1.1;
       else if (m === "P1") a = 0.5;
@@ -772,8 +794,27 @@ export default function App() {
       if (raceStartTimeRef.current && now >= raceStartTimeRef.current) {
         
         // 1. UPDATE CPU IF CPU OPPONENT ACTIVE
-        const features = room?.trackFeatures || [];
+        const features = roomRef.current?.trackFeatures || [];
         updateCpuDriverSim(dt, features);
+
+        // Replication of simulated CPU values or remote player dead reckoning extrapolation
+        if (isCpuMatch) {
+          opponentPositionRef.current = cpuPositionRef.current;
+          opponentSpeedRef.current = cpuSpeedRef.current;
+          opponentFinishedRef.current = cpuFinishedRef.current;
+          opponentDerailedRef.current = cpuDerailedRef.current;
+          opponentMasconRef.current = cpuMasconRef.current;
+        } else {
+          // If remote player match, smooth move opponent between server polls
+          if (!opponentFinishedRef.current) {
+            const lineType_ = roomRef.current?.line || 'shonan';
+            const oppCfg = getLineConfig(lineType_);
+            opponentPositionRef.current = Math.min(
+              oppCfg.trackLength,
+              opponentPositionRef.current + (opponentSpeedRef.current / 3.6) * dt
+            );
+          }
+        }
 
         // 2. TIMERS & BUFFS
         if (speedBoostActive) {
@@ -796,7 +837,7 @@ export default function App() {
               setStationStopped(false);
               setStationGrade("");
               // push slightly past station block so it doesn't trigger stop immediately again
-              const activeLine_ = room?.line || 'shonan';
+              const activeLine_ = roomRef.current?.line || 'shonan';
               const cfg_ = getLineConfig(activeLine_);
               myPositionRef.current = cfg_.stationStop + 1;
               playSynthSound("beep");
@@ -819,48 +860,32 @@ export default function App() {
               myDerailTimeLeftRef.current = 0;
             }
           } else {
-            // Overheat circuit-breaker block
-            if (myOverheatRef.current >= 100) {
-              accelForce = 0;
-              myOverheatRef.current -= dt * 14; 
-              if (myOverheatRef.current <= 25) {
-                // fuse reset once cooled down below 25
-                myOverheatRef.current = 25;
-              }
-            } else {
-              // Active acceleration power based on current mascon handle selection
-              const notch = myMasconRef.current;
-              // Apply acceleration multiplier if perfect stop speed boost is active
-              const boostMultiplier = speedBoostActive ? 1.6 : 1.0;
+            // Overheat disabled
+            myOverheatRef.current = 0;
 
-              if (notch === "P4") {
-                accelForce = 2.8 * boostMultiplier;
-                myOverheatRef.current += dt * 13; // temperature increases
-              } else if (notch === "P3") {
-                accelForce = 2.0 * boostMultiplier;
-                myOverheatRef.current += dt * 5.5;
-              } else if (notch === "P2") {
-                accelForce = 1.1 * boostMultiplier;
-                myOverheatRef.current += dt * 1.5;
-              } else if (notch === "P1") {
-                accelForce = 0.5 * boostMultiplier;
-                myOverheatRef.current = Math.max(0, myOverheatRef.current - dt * 1.5);
-              } else if (notch === "N") {
-                accelForce = 0.0;
-                myOverheatRef.current = Math.max(0, myOverheatRef.current - dt * 6.5);
-              } else if (notch === "B1") {
-                accelForce = -1.6;
-                myOverheatRef.current = Math.max(0, myOverheatRef.current - dt * 8);
-              } else if (notch === "B2") {
-                accelForce = -3.5;
-                myOverheatRef.current = Math.max(0, myOverheatRef.current - dt * 8);
-              } else if (notch === "B3") {
-                accelForce = -5.8;
-                myOverheatRef.current = Math.max(0, myOverheatRef.current - dt * 8);
-              } else if (notch === "EB") {
-                accelForce = -9.2;
-                myOverheatRef.current = Math.max(0, myOverheatRef.current - dt * 8);
-              }
+            // Active acceleration power based on current mascon handle selection
+            const notch = myMasconRef.current;
+            // Apply acceleration multiplier if perfect stop speed boost is active
+            const boostMultiplier = speedBoostActive ? 1.6 : 1.0;
+
+            if (notch === "P4") {
+              accelForce = 2.8 * boostMultiplier;
+            } else if (notch === "P3") {
+              accelForce = 2.0 * boostMultiplier;
+            } else if (notch === "P2") {
+              accelForce = 1.1 * boostMultiplier;
+            } else if (notch === "P1") {
+              accelForce = 0.5 * boostMultiplier;
+            } else if (notch === "N") {
+              accelForce = 0.0;
+            } else if (notch === "B1") {
+              accelForce = -1.6;
+            } else if (notch === "B2") {
+              accelForce = -3.5;
+            } else if (notch === "B3") {
+              accelForce = -5.8;
+            } else if (notch === "EB") {
+              accelForce = -9.2;
             }
           }
 
@@ -881,7 +906,7 @@ export default function App() {
         let warningText = "";
         let riskValue = 0;
 
-        const activeLine = room?.line || 'shonan';
+        const activeLine = roomRef.current?.line || 'shonan';
         const cfg = getLineConfig(activeLine);
 
         // Check active curves & speed limits
@@ -981,7 +1006,7 @@ export default function App() {
           opponentSpeed: opponentSpeedRef.current,
           opponentFinished: opponentFinishedRef.current,
           opponentDerailed: opponentDerailedRef.current,
-          opponentName: renderStats.opponentName,
+          opponentName: opponentNameRef.current,
           opponentMascon: opponentMasconRef.current,
         });
       }
@@ -1959,6 +1984,11 @@ export default function App() {
                     });
                     const cpuData = await cpuRes.json();
                     setRoom(cpuData);
+                    setIsCpuMatch(true);
+                    const foundCpuKey = Object.keys(cpuData.players).find((id) => id.startsWith("cpu_"));
+                    if (foundCpuKey) {
+                      cpuPlayerIdRef.current = foundCpuKey;
+                    }
                     playSynthSound("chime");
                   } catch (_) {}
                 }}
@@ -1989,7 +2019,7 @@ export default function App() {
             const dynamicTrackLength = cfg.trackLength;
             
             return (
-              <section className="bg-slate-900 border-2 border-slate-800 rounded-xl p-4 shadow-lg flex flex-wrap gap-4 items-center justify-between">
+              <section className="bg-slate-900 border-2 border-slate-800 rounded-xl p-2 sm:p-3 shadow-lg flex flex-wrap gap-2 sm:gap-4 items-center justify-between">
                 {/* Left Section: Progress track layout overview */}
                 <div className="flex-1 min-w-[280px]">
                   <div className="flex justify-between text-[10px] font-mono text-slate-500 mb-1">
@@ -2075,7 +2105,7 @@ export default function App() {
           })()}
 
           {/* ACTIVE 2D PARALLAX RAILWAY RACING STAGE */}
-          <section className="relative h-36 sm:h-44 md:h-48 lg:h-52 bg-gradient-to-b from-sky-950 to-indigo-950 border-4 border-slate-800 rounded-2xl overflow-hidden shadow-2xl flex flex-col justify-end shrink-0">
+          <section className="relative h-28 sm:h-32 md:h-36 lg:h-40 bg-gradient-to-b from-sky-950 to-indigo-950 border-4 border-slate-800 rounded-2xl overflow-hidden shadow-2xl flex flex-col justify-end shrink-0">
             
             {/* Background Parallax: Sky & Stars */}
             <div 
@@ -2085,10 +2115,10 @@ export default function App() {
 
             {/* Parallax Mountains layer (Outline look) */}
             <div 
-              className="absolute bottom-12 left-0 right-0 h-20 bg-no-repeat bg-bottom pointer-events-none opacity-20"
+              className="absolute bottom-6 left-0 right-0 h-16 bg-no-repeat bg-bottom pointer-events-none opacity-20"
               style={{
                 backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 400 100'%3E%3Cpolygon points='0,100 80,40 160,100 240,30 320,100 400,50' fill='%23475569'/%3E%3C/svg%3E")`,
-                backgroundSize: '400px 80px',
+                backgroundSize: '400px 60px',
                 backgroundPosition: `${mtOffset}px bottom`
               }}
             ></div>
@@ -2116,15 +2146,15 @@ export default function App() {
                   {/* Station building visible */}
                   {stationScrollX > -200 && stationScrollX < 1200 && (
                     <div 
-                      className="absolute bottom-11 h-14 bg-slate-800 border-x border-t border-slate-700 px-4 py-1 flex flex-col justify-between z-0 shadow-lg text-slate-300 pointer-events-none w-[180px]"
+                      className="absolute bottom-[22px] h-10 bg-slate-800 border-x border-t border-slate-700 px-3 py-0.5 flex flex-col justify-between z-0 shadow-lg text-slate-300 pointer-events-none w-[150px]"
                       style={{ left: `${stationScrollX}px` }}
                     >
-                      <div className="text-[8px] font-mono bg-emerald-950 text-emerald-400 px-1 font-bold truncate">
+                      <div className="text-[7px] font-mono bg-emerald-950 text-emerald-400 px-1 font-bold truncate">
                         {cfg.stationLabel.toUpperCase()}
                       </div>
-                      <div className="flex justify-between items-center bg-slate-900 border border-slate-700 text-[6.5px] px-1 font-mono">
-                        <span>■ ■ ■ Stop Marker</span>
-                        <span className="text-amber-500 animate-pulse">STOP AT 0km/h</span>
+                      <div className="flex justify-between items-center bg-slate-900 border border-slate-700 text-[6px] px-1 font-mono">
+                        <span>■ Stop Marker</span>
+                        <span className="text-amber-500 animate-pulse">0km/h</span>
                       </div>
                     </div>
                   )}
@@ -2132,33 +2162,33 @@ export default function App() {
                   {/* Signal 1 structure */}
                   {signal1ScrollX > -50 && signal1ScrollX < 1200 && (
                     <div 
-                      className="absolute bottom-11 w-8 h-20 flex flex-col items-center justify-end z-0 pointer-events-none"
+                      className="absolute bottom-[22px] w-8 h-15 flex flex-col items-center justify-end z-0 pointer-events-none"
                       style={{ left: `${signal1ScrollX}px` }}
                     >
                       {/* Signal post frame */}
-                      <div className="w-4 h-6 bg-slate-900 border border-slate-700 rounded-md p-0.5 flex flex-col justify-around items-center">
+                      <div className="w-4 h-5 bg-slate-900 border border-slate-700 rounded-md p-0.5 flex flex-col justify-around items-center">
                         <circle cx="0" cy="0" r="1.5" className={`w-1.5 h-1.5 rounded-full ${s1Red ? "bg-red-500 animate-pulse shadow-[0_0_8px_red]" : "bg-red-950"}`} />
                         <circle cx="0" cy="0" r="1.5" className={`w-1.5 h-1.5 rounded-full ${s1Yellow ? "bg-amber-500 shadow-[0_0_8px_yellow]" : "bg-amber-950"}`} />
                         <circle cx="0" cy="0" r="1.5" className={`w-1.5 h-1.5 rounded-full ${(!s1Red && !s1Yellow) ? "bg-emerald-500 shadow-[0_0_8px_green]" : "bg-emerald-950"}`} />
                       </div>
-                      <div className="w-1.5 h-14 bg-slate-700"></div>
-                      <div className="text-[7px] font-mono text-slate-500">{cfg.signal1}m</div>
+                      <div className="w-1.5 h-10 bg-slate-700"></div>
+                      <div className="text-[6px] font-mono text-slate-500">{cfg.signal1}m</div>
                     </div>
                   )}
 
                   {/* Signal 2 structure */}
                   {cfg.signal2 && signal2ScrollX > -50 && signal2ScrollX < 1200 && (
                     <div 
-                      className="absolute bottom-11 w-8 h-20 flex flex-col items-center justify-end z-0 pointer-events-none"
+                      className="absolute bottom-[22px] w-8 h-15 flex flex-col items-center justify-end z-0 pointer-events-none"
                       style={{ left: `${signal2ScrollX}px` }}
                     >
-                      <div className="w-4 h-6 bg-slate-900 border border-slate-700 rounded-md p-0.5 flex flex-col justify-around items-center">
+                      <div className="w-4 h-5 bg-slate-900 border border-slate-700 rounded-md p-0.5 flex flex-col justify-around items-center">
                         <circle cx="0" cy="0" r="1.5" className={`w-1.5 h-1.5 rounded-full ${s2Red ? "bg-red-500 animate-pulse shadow-[0_0_8px_red]" : "bg-red-950"}`} />
                         <circle cx="0" cy="0" r="1.5" className={`w-1.5 h-1.5 rounded-full ${s2Yellow ? "bg-amber-500 shadow-[0_0_8px_yellow]" : "bg-amber-950"}`} />
                         <circle cx="0" cy="0" r="1.5" className={`w-1.5 h-1.5 rounded-full ${(!s2Red && !s2Yellow) ? "bg-emerald-500 shadow-[0_0_8px_green]" : "bg-emerald-950"}`} />
                       </div>
-                      <div className="w-1.5 h-14 bg-slate-700"></div>
-                      <div className="text-[7px] font-mono text-slate-500">{cfg.signal2}m</div>
+                      <div className="w-1.5 h-10 bg-slate-700"></div>
+                      <div className="text-[6px] font-mono text-slate-500">{cfg.signal2}m</div>
                     </div>
                   )}
                 </>
@@ -2166,19 +2196,19 @@ export default function App() {
             })()}
 
             {/* TRACK 1: Player's Train (Track layout) */}
-            <div className="h-16 relative bg-slate-900/60 border-b border-indigo-900/40 z-10 flex items-center pr-12">
+            <div className="h-11 relative bg-slate-900/60 border-b border-indigo-900/40 z-10 flex items-center pr-12">
               {/* Rails moving background */}
               <div 
                 className="absolute inset-0 bg-repeat-x opacity-25"
                 style={{
-                  backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 8'%3E%3Cline x1='0' y1='4' x2='40' y2='4' stroke='%23ffffff' stroke-width='1.5'/%3E%3Cline x1='10' y1='0' x2='10' y2='8' stroke='%23ffffff' stroke-width='1.5'/%3E%3Cline x1='30' y1='0' x2='30' y2='8' stroke='%23ffffff' stroke-width='1.5'/%3E%3C/svg%3E")`,
+                  backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2500/svg' viewBox='0 0 40 8'%3E%3Cline x1='0' y1='4' x2='40' y2='4' stroke='%23ffffff' stroke-width='1.5'/%3E%3Cline x1='10' y1='0' x2='10' y2='8' stroke='%23ffffff' stroke-width='1.5'/%3E%3Cline x1='30' y1='0' x2='30' y2='8' stroke='%23ffffff' stroke-width='1.5'/%3E%3C/svg%3E")`,
                   backgroundSize: '40px 8px',
                   backgroundPosition: `${trackOffset}px bottom`
                 }}
               ></div>
 
               {/* Player train wrapper fixed at viewport 120px offset */}
-              <div className="absolute left-[120px]" style={{ width: '420px', height: '91px' }}>
+              <div className="absolute left-[120px]" style={{ width: '320px', height: '62px' }}>
                 <TrainVisual 
                   speed={renderStats.mySpeed} 
                   isBraking={myMasconRef.current.startsWith("B") || myMasconRef.current === "EB"}
@@ -2190,7 +2220,7 @@ export default function App() {
             </div>
 
             {/* TRACK 2: Opponent's Train (Parallel track below yours) */}
-            <div className="h-14 relative bg-slate-950/70 z-10 flex items-center pr-12">
+            <div className="h-9 relative bg-slate-950/70 z-10 flex items-center pr-12">
               <div 
                 className="absolute inset-0 bg-repeat-x opacity-15"
                 style={{
@@ -2208,7 +2238,7 @@ export default function App() {
 
                 if (opponentX > -500 && opponentX < 1200) {
                   return (
-                    <div className="absolute transition-all duration-300" style={{ left: `${opponentX}px`, width: '420px', height: '91px', bottom: '0px' }}>
+                    <div className="absolute transition-all duration-300" style={{ left: `${opponentX}px`, width: '320px', height: '62px', bottom: '0px' }}>
                       <TrainVisual 
                         speed={renderStats.opponentSpeed} 
                         isBraking={renderStats.opponentMascon.startsWith("B") || renderStats.opponentMascon === "EB"}
@@ -2234,14 +2264,6 @@ export default function App() {
                 <div className="text-[11px] text-slate-500 mt-2">
                   画面のマスコンハンドル［P4 / Wキー］に指をかけて発車待機！
                 </div>
-              </div>
-            )}
-
-            {/* Overheating blown-break lock overlay */}
-            {renderStats.myOverheat >= 100 && (
-              <div className="absolute inset-x-0 top-0 bg-rose-950/80 border-b border-rose-600/50 py-2 text-center text-xs font-mono font-bold text-rose-350 z-20 animate-pulse flex items-center justify-center gap-2">
-                <Flame className="w-4 h-4 text-rose-400 animate-bounce" />
-                🚨 過熱防止保護ヒューズ溶断：出力遮断中！ 自動冷却をお待ちください。 🚨
               </div>
             )}
 
