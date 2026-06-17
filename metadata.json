@@ -1,0 +1,6 @@
+{
+  "name": "トレインレーシング２D",
+  "description": "レトロスタイルの2D電車レースゲーム！実在するJR湘南線風の車両を操縦し、制限速度や信号を守りながらオンラインで対戦し、日本一の運転士を目指そう！",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
